@@ -5,6 +5,13 @@ const SVG_URL = "https://raw.githubusercontent.com/chauctw-ctn/scada/28d326e748a
 const TEST_DEVICE = "CTW_TAG";
 const TEST_KEY = "API_BVT01_Cm_34_nc_th_Flow01";
 
+// Key mapping configuration
+const KEY_MAP = [
+  { key: "API_BVT01_Cm_34_nc_th_Flow01", svgID: "CTW_TAG_API_BVT01_Cm_34_nc_th_Flow01", source: "telemetry", format: v => Number(v).toFixed(2) },
+  { key: "running", svgID: "CTW_TAG_running", source: "attributes", format: v => v },
+  // Thêm các mapping khác ở đây
+];
+
 /* =====================================================
    STATE
 ===================================================== */
@@ -282,13 +289,21 @@ self.onDestroy = function () {
 self.onDataUpdated = function () {
   if (!svgReady) return;
 
-  getKey(TEST_DEVICE, "telemetry", TEST_KEY, value => {
-    console.log("📡", TEST_KEY, "=", value);
-    const textEl = document.getElementById("debug_value");
-    if (textEl) textEl.textContent = value ?? "NO DATA";
-  });
-
-  getKey("CTW_TAG", "shared", "running", value => {
-    console.log("Running:", value);
+  // Sử dụng KEY_MAP để cập nhật tất cả các giá trị
+  KEY_MAP.forEach(config => {
+    getKey(TEST_DEVICE, config.source, config.key, value => {
+      console.log("📡", config.key, "=", value);
+      
+      // Format value nếu có
+      const formattedValue = value != null && config.format 
+        ? config.format(value) 
+        : (value ?? "NO DATA");
+      
+      // Cập nhật SVG element
+      const svgEl = document.getElementById(config.svgID);
+      if (svgEl) {
+        svgEl.textContent = formattedValue;
+      }
+    });
   });
 };
