@@ -14,12 +14,41 @@ const MAP_TEXT = [
   { key: "API_BVT01_Cm_34_nc_th_Flow01", svg: "bv_c1_nt_hz_p1", source: "telemetry", format: v => Number(v).toFixed(2) },
 ];
 
+const MAP_CALCULATION = [  
+  {
+    name: "c12_total_flow",
+    inputs: ["API_BVT01_NM__NM1_Cm_1_D600_Pulse01", "API_BVT01_NM__NM1_Cm_2_D500_Pulse01"],
+    source: "telemetry",
+    calculate: (values) => {
+      const [flow1, flow2] = Object.values(values);
+      return (Number(flow1) || 0) + (Number(flow2) || 0);
+    },
+    // Scale 4-20mA → 0-10bar    
+    // name: "pressure_bar",
+    // inputs: ["current_sensor_mA"], // Key chứa giá trị dòng điện (mA)
+    // source: "telemetry",
+    // calculate: (values) => {
+    //   const current = Number(values.current_sensor_mA) || 0;      
+    //   // Giới hạn trong khoảng [4, 20] mA
+    //   const currentClamped = Math.max(4, Math.min(20, current));      
+    //   // Scale tuyến tính:
+    //   // 4mA  → 0 bar
+    //   // 20mA → 10 bar
+    //   // Công thức: pressure = ((current - 4) / (20 - 4)) * (10 - 0)
+    //   const pressure = ((currentClamped - 4) / 16) * 10;      
+    //   return pressure.toFixed(2); // 2 chữ số thập phân
+    // },
+    interval: 10000 // ms
+  },
+];
+
 /* =====================================================
    STATE
 ===================================================== */
 let svgReady = false;
 let updateTimer = null;
 let wsSubscriptions = [];
+let calcTimers = new Map();
 const cache = new Map();
 const fetchState = new Map();
 const callbacks = new Map();
@@ -295,6 +324,125 @@ const updateIcon = (item) => {
 };
 
 /* =====================================================
+   SEND TELEMETRY
+===================================================== */
+const sendTelemetry = (deviceName, key, value) => {
+  const entity = getEntityByDevice(deviceName);
+  if (!entity) {
+    console.error(`❌ Cannot send telemetry: device "${deviceName}" not found`);
+    return Promise.reject(new Error('Device not found'));
+  }
+
+  const url = `/api/plugins/telemetry/${entity.entityType}/${entity.id}/timeseries/ANY`;
+  const body = { [key]: value };
+  
+  const http = self.ctx?.http || self.ctx?.httpClient;
+  
+  if (http?.post) {
+    try {
+      const obs = http.post(url, body);
+      if (obs?.subscribe) {
+        return new Promise((resolve, reject) => {
+          obs.subscribe(
+            res => {
+              console.log(`✅ Sent telemetry: ${key} = ${value}`);
+              resolve(res);
+            },
+            err => {
+              console.error(`❌ Send telemetry failed: ${key}`, err);
+              reject(err);
+            }
+          );
+        });
+      }
+    } catch (e) {}
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['X-Authorization'] = `Bearer ${token}`;
+
+  return fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body)
+  })
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      console.log(`✅ Sent telemetry: ${key} = ${value}`);
+      return r.json().catch(() => ({}));
+    })
+    .catch(err => {
+      console.error(`❌ Send telemetry failed: ${key}`, err);
+      throw err;
+    });
+};
+
+/* =====================================================
+   CALCULATION & AUTO SEND
+===================================================== */
+const processCalculation = (calcConfig) => {
+  if (!calcConfig?.name || !calcConfig.inputs?.length || !calcConfig.calculate) return;
+
+  const values = {};
+  let pending = calcConfig.inputs.length;
+
+  const tryCalculate = () => {
+    if (pending > 0) return;
+    
+    try {
+      const result = calcConfig.calculate(values);
+      console.log(`🧮 Calculated: ${calcConfig.name} = ${result}`, values);
+      
+      sendTelemetry(deviceName, calcConfig.name, result)
+        .catch(err => console.error(`Failed to send ${calcConfig.name}:`, err));
+    } catch (err) {
+      console.error(`Calculation error for ${calcConfig.name}:`, err);
+    }
+  };
+
+  calcConfig.inputs.forEach(key => {
+    getKey(deviceName, calcConfig.source || 'telemetry', key, value => {
+      values[key] = value;
+      pending--;
+      tryCalculate();
+    });
+  });
+};
+
+const startCalculations = () => {
+  if (!MAP_CALCULATION || MAP_CALCULATION.length === 0) {
+    console.log('ℹ️ No calculations configured');
+    return;
+  }
+
+  calcTimers.forEach(timer => clearInterval(timer));
+  calcTimers.clear();
+
+  MAP_CALCULATION.forEach(calc => {
+    const interval = calc.interval || UPDATE_INTERVAL;
+    
+    processCalculation(calc);
+    
+    const timer = setInterval(() => {
+      clearCache();
+      processCalculation(calc);
+    }, interval);
+    
+    calcTimers.set(calc.name, timer);
+    console.log(`⏰ Calculation "${calc.name}" scheduled every ${interval}ms`);
+  });
+};
+
+const stopCalculations = () => {
+  calcTimers.forEach(timer => clearInterval(timer));
+  calcTimers.clear();
+  if (MAP_CALCULATION?.length > 0) {
+    console.log('🛑 All calculations stopped');
+  }
+};
+
+/* =====================================================
    WEBSOCKET SUBSCRIPTION
 ===================================================== */
 const subscribeToKeys = () => {
@@ -391,6 +539,9 @@ self.onInit = function () {
       // Setup WebSocket subscriptions
       subscribeToKeys();
       
+      // Start calculations
+      startCalculations();
+      
       // Fallback polling (nếu WebSocket lỗi hoặc tắt)
       if (updateTimer) clearInterval(updateTimer);
       updateTimer = setInterval(() => {
@@ -403,6 +554,10 @@ self.onInit = function () {
 
 self.onDestroy = function () {
   if (updateTimer) clearInterval(updateTimer);
+  
+  // Stop calculations
+  stopCalculations();
+  
   // Cleanup WebSocket subscriptions
   wsSubscriptions.forEach(sub => {
     try { 
@@ -412,7 +567,7 @@ self.onDestroy = function () {
     } catch {}
   });
   wsSubscriptions = [];
-  console.log('🔌 WebSocket subscriptions cleaned up');
+  console.log('🔌 Cleanup completed');
 };
 
 self.onDataUpdated = function () {
