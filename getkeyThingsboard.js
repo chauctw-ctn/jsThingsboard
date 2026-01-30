@@ -2,14 +2,14 @@
    CONFIG
 ===================================================== */
 const SVG_URL = "https://raw.githubusercontent.com/chauctw-ctn/scada/28d326e748acc701b349fe2ac3012a2cc9c9d0e4/Main_BV_3001.svg";
-const TEST_DEVICE = "CTW_TAG";
-const TEST_KEY = "API_BVT01_Cm_34_nc_th_Flow01";
+const deviceName = "CTW_TAG";
 
-// Key mapping configuration
-const KEY_MAP = [
-  { key: "API_BVT01_Cm_34_nc_th_Flow01", svgID: "CTW_TAG_API_BVT01_Cm_34_nc_th_Flow01", source: "telemetry", format: v => Number(v).toFixed(2) },
-  { key: "running", svgID: "CTW_TAG_running", source: "attributes", format: v => v },
-  // Thêm các mapping khác ở đây
+const MAP_ICON = [
+  { key: "running", svg: "bv_st_c1_nt_hz_p1", source: "shared" },
+];
+
+const MAP_TEXT = [
+  { key: "API_BVT01_Cm_34_nc_th_Flow01", svg: "bv_c1_nt_hz_p1", source: "telemetry", format: v => Number(v).toFixed(2) },
 ];
 
 /* =====================================================
@@ -21,11 +21,7 @@ const cache = new Map();
 const fetchState = new Map();
 const callbacks = new Map();
 
-// Hàm clear cache để force refresh
-const clearCache = () => {
-  cache.clear();
-  fetchState.clear();
-};
+const clearCache = () => { cache.clear(); fetchState.clear(); };
 
 /* =====================================================
    HELPERS
@@ -49,9 +45,7 @@ const normalizeEntity = (entity) => {
 
 const enqueue = (key, cb) => {
   if (typeof cb !== 'function') return;
-  const arr = callbacks.get(key) || [];
-  arr.push(cb);
-  callbacks.set(key, arr);
+  callbacks.set(key, [...(callbacks.get(key) || []), cb]);
 };
 
 const flush = (key, value) => {
@@ -106,10 +100,7 @@ const extractValue = (data) => {
     }
     return null;
   }
-  if (typeof data === 'object') {
-    return data.value ?? data.val ?? null;
-  }
-  return data;
+  return typeof data === 'object' ? (data.value ?? data.val ?? null) : data;
 };
 
 const extractFromResponse = (res, key) => {
@@ -252,6 +243,53 @@ const getKey = (deviceName, source, key, callback, forceRefresh = false) => {
 };
 
 /* =====================================================
+   SVG & UPDATE HELPERS
+===================================================== */
+
+const toBooleanStatus = (value) => {
+  if (value == null) return false;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const lower = value.toLowerCase().trim();
+    if (["true", "on", "yes"].includes(lower)) return true;
+    if (["false", "off", "no"].includes(lower)) return false;
+    const num = parseFloat(lower);
+    return !isNaN(num) ? num !== 0 : lower.length > 0;
+  }
+  return false;
+};
+
+const updateText = (svgId, value) => {
+  const el = document.getElementById(svgId);
+  if (!el) return;
+  const txt = value != null ? String(value) : "--";
+  el.setAttribute("text-anchor", "middle");
+  const tspan = el.querySelector("tspan");
+  (tspan || el).textContent = txt;
+};
+
+const applyStatusStyle = (svgId, running) => {
+  const color = running ? "lime" : "red";
+  const glow = running ? "drop-shadow(0 0 8px lime)" : "drop-shadow(0 0 10px red)";
+  const styleId = "style-" + svgId;
+  let styleTag = document.getElementById(styleId);
+  if (!styleTag) {
+    styleTag = document.createElement("style");
+    styleTag.id = styleId;
+    document.head.appendChild(styleTag);
+  }
+  styleTag.innerHTML = `#${svgId} path,#${svgId} circle,#${svgId} rect,#${svgId} line,#${svgId} polygon{stroke:${color}!important;stroke-width:2px!important;transition:stroke .3s,filter .3s}#${svgId}{filter:${glow}}`;
+};
+
+const updateIcon = (item) => {
+  if (!item?.key || !item.svg) return;
+  getKey(deviceName, item.source, item.key, value => {
+    applyStatusStyle(item.svg, toBooleanStatus(value));
+  });
+};
+
+/* =====================================================
    SVG & UPDATE
 ===================================================== */
 self.onInit = function () {
@@ -288,22 +326,11 @@ self.onDestroy = function () {
 
 self.onDataUpdated = function () {
   if (!svgReady) return;
-
-  // Sử dụng KEY_MAP để cập nhật tất cả các giá trị
-  KEY_MAP.forEach(config => {
-    getKey(TEST_DEVICE, config.source, config.key, value => {
-      console.log("📡", config.key, "=", value);
-      
-      // Format value nếu có
-      const formattedValue = value != null && config.format 
-        ? config.format(value) 
-        : (value ?? "NO DATA");
-      
-      // Cập nhật SVG element
-      const svgEl = document.getElementById(config.svgID);
-      if (svgEl) {
-        svgEl.textContent = formattedValue;
-      }
+  MAP_ICON.forEach(updateIcon);
+  MAP_TEXT.forEach(item => {
+    if (!item?.key) return;
+    getKey(deviceName, item.source, item.key, value => {
+      updateText(item.svg, value != null && item.format ? item.format(value) : (value ?? "--"));
     });
   });
 };
