@@ -3,6 +3,8 @@
 ===================================================== */
 const SVG_URL = "https://raw.githubusercontent.com/chauctw-ctn/scada/28d326e748acc701b349fe2ac3012a2cc9c9d0e4/Main_BV_3001.svg";
 const deviceName = "CTW_TAG";
+const UPDATE_INTERVAL = 5000; // Fallback polling interval (ms)
+const USE_WEBSOCKET = true; // Enable/disable WebSocket
 
 const MAP_ICON = [
   { key: "running", svg: "bv_st_c1_nt_hz_p1", source: "shared" },
@@ -17,6 +19,7 @@ const MAP_TEXT = [
 ===================================================== */
 let svgReady = false;
 let updateTimer = null;
+let wsSubscriptions = [];
 const cache = new Map();
 const fetchState = new Map();
 const callbacks = new Map();
@@ -285,8 +288,83 @@ const applyStatusStyle = (svgId, running) => {
 const updateIcon = (item) => {
   if (!item?.key || !item.svg) return;
   getKey(deviceName, item.source, item.key, value => {
-    applyStatusStyle(item.svg, toBooleanStatus(value));
+    const status = toBooleanStatus(value);
+    console.log(`🎨 Icon: ${item.key} = ${value} → ${status ? 'ON' : 'OFF'} [${item.svg}]`);
+    applyStatusStyle(item.svg, status);
   });
+};
+
+/* =====================================================
+   WEBSOCKET SUBSCRIPTION
+===================================================== */
+const subscribeToKeys = () => {
+  if (!USE_WEBSOCKET || !self.ctx?.subscriptionApi) {
+    console.log('⚠️ WebSocket disabled or not available');
+    return;
+  }
+  
+  const entity = getEntityByDevice(deviceName);
+  if (!entity) {
+    console.log('⚠️ Cannot subscribe: entity not found');
+    return;
+  }
+
+  // Cleanup old subscriptions
+  wsSubscriptions.forEach(sub => {
+    try { self.ctx.subscriptionApi.removeSubscription(sub); } catch {}
+  });
+  wsSubscriptions = [];
+
+  // Subscribe to telemetry keys
+  const teleKeys = [...MAP_TEXT, ...MAP_ICON]
+    .filter(m => normalize(m.source) === 'telemetry')
+    .map(m => m.key)
+    .filter((k, i, arr) => arr.indexOf(k) === i); // unique
+  
+  if (teleKeys.length) {
+    const teleSub = {
+      entityId: entity,
+      type: 'timeseries',
+      keys: teleKeys
+    };
+    try {
+      self.ctx.subscriptionApi.createSubscription(teleSub, (data) => {
+        console.log('🔄 WebSocket Telemetry update:', data);
+        clearCache();
+        self.onDataUpdated();
+      });
+      wsSubscriptions.push(teleSub);
+      console.log('✅ Subscribed to telemetry keys:', teleKeys);
+    } catch (err) {
+      console.error('❌ Telemetry subscription failed:', err);
+    }
+  }
+
+  // Subscribe to attribute keys
+  const attrKeys = [...MAP_TEXT, ...MAP_ICON]
+    .filter(m => ['shared', 'attribute', 'attributes'].includes(normalize(m.source)))
+    .map(m => m.key)
+    .filter((k, i, arr) => arr.indexOf(k) === i); // unique
+  
+  if (attrKeys.length) {
+    const attrSub = {
+      entityId: entity,
+      type: 'attributes',
+      scope: 'SHARED_SCOPE',
+      keys: attrKeys
+    };
+    try {
+      self.ctx.subscriptionApi.createSubscription(attrSub, (data) => {
+        console.log('🔄 WebSocket Attribute update:', data);
+        clearCache();
+        self.onDataUpdated();
+      });
+      wsSubscriptions.push(attrSub);
+      console.log('✅ Subscribed to attribute keys:', attrKeys);
+    } catch (err) {
+      console.error('❌ Attribute subscription failed:', err);
+    }
+  }
 };
 
 /* =====================================================
@@ -310,18 +388,31 @@ self.onInit = function () {
       svgReady = true;
       self.onDataUpdated();
       
-      // Auto refresh mỗi 5s
+      // Setup WebSocket subscriptions
+      subscribeToKeys();
+      
+      // Fallback polling (nếu WebSocket lỗi hoặc tắt)
       if (updateTimer) clearInterval(updateTimer);
       updateTimer = setInterval(() => {
         clearCache();
         self.onDataUpdated();
-      }, 5000);
+      }, UPDATE_INTERVAL);
     })
     .catch(err => console.error("SVG load error", err));
 };
 
 self.onDestroy = function () {
   if (updateTimer) clearInterval(updateTimer);
+  // Cleanup WebSocket subscriptions
+  wsSubscriptions.forEach(sub => {
+    try { 
+      if (self.ctx?.subscriptionApi) {
+        self.ctx.subscriptionApi.removeSubscription(sub);
+      }
+    } catch {}
+  });
+  wsSubscriptions = [];
+  console.log('🔌 WebSocket subscriptions cleaned up');
 };
 
 self.onDataUpdated = function () {
@@ -330,7 +421,9 @@ self.onDataUpdated = function () {
   MAP_TEXT.forEach(item => {
     if (!item?.key) return;
     getKey(deviceName, item.source, item.key, value => {
-      updateText(item.svg, value != null && item.format ? item.format(value) : (value ?? "--"));
+      const formatted = value != null && item.format ? item.format(value) : (value ?? "--");
+      console.log(`📊 Text: ${item.key} = ${value} → "${formatted}" [${item.svg}]`);
+      updateText(item.svg, formatted);
     });
   });
 };
